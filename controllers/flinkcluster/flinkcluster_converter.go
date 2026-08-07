@@ -138,7 +138,7 @@ func getDesiredClusterState(observed *ObservedClusterState) *model.DesiredCluste
 	return state
 }
 
-func newJobManagerContainer(flinkCluster *v1beta1.FlinkCluster) *corev1.Container {
+func newJobManagerContainer(flinkCluster *v1beta1.FlinkCluster, jobId string) *corev1.Container {
 	var clusterSpec = flinkCluster.Spec
 	var imageSpec = clusterSpec.Image
 	var jobManagerSpec = clusterSpec.JobManager
@@ -189,7 +189,6 @@ func newJobManagerContainer(flinkCluster *v1beta1.FlinkCluster) *corev1.Containe
 			args = append(args, "--allowNonRestoredState")
 		}
 
-		jobId, _ := GenJobId(flinkCluster)
 		args = append(args,
 			"--job-id", jobId,
 			"--job-classname", *jobSpec.ClassName,
@@ -237,7 +236,7 @@ func newJobManagerStatefulSet(flinkCluster *v1beta1.FlinkCluster) *appsv1.Statef
 	podLabels = mergeLabels(podLabels, jobManagerSpec.PodLabels)
 	var statefulSetLabels = mergeLabels(podLabels, getRevisionHashLabels(&flinkCluster.Status.Revision))
 
-	mainContainer := newJobManagerContainer(flinkCluster)
+	mainContainer := newJobManagerContainer(flinkCluster, "")
 	podSpec := newJobManagerPodSpec(mainContainer, flinkCluster)
 
 	var pvcs []corev1.PersistentVolumeClaim
@@ -900,7 +899,7 @@ func newJob(flinkCluster *v1beta1.FlinkCluster) *batchv1.Job {
 		labels = mergeLabels(labels, map[string]string{JobIdLabel: jobId})
 		jobName = getJobManagerJobName(flinkCluster.Name)
 		annotations = jobManagerSpec.PodAnnotations
-		mainContainer := newJobManagerContainer(flinkCluster)
+		mainContainer := newJobManagerContainer(flinkCluster, jobId)
 		podSpec = newJobManagerPodSpec(mainContainer, flinkCluster)
 	} else {
 		jobName = getSubmitterJobName(flinkCluster.Name)

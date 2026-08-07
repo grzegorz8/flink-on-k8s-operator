@@ -588,11 +588,23 @@ func GenJobId(cluster *v1beta1.FlinkCluster) (string, error) {
 		return cluster.Status.Components.Job.ID, nil
 	}
 
+	return computeJobId(cluster)
+}
+
+func computeJobId(cluster *v1beta1.FlinkCluster) (string, error) {
 	if cluster == nil || len(cluster.Status.Revision.NextRevision) == 0 {
 		return "", fmt.Errorf("error generating job id: cluster or next revision is nil")
 	}
 
-	hash := md5.Sum([]byte(cluster.Status.Revision.NextRevision))
+	savepointLocation := ""
+	if cluster.Spec.Job != nil {
+		restoreLocation := convertFromSavepoint(cluster.Spec.Job, cluster.Status.Components.Job, &cluster.Status.Revision)
+		if restoreLocation != nil {
+			savepointLocation = *restoreLocation
+		}
+	}
+	data := fmt.Sprintf("%s-%s-%s", cluster.UID, cluster.Status.Revision.NextRevision, savepointLocation)
+	hash := md5.Sum([]byte(data))
 	return hex.EncodeToString(hash[:]), nil
 }
 

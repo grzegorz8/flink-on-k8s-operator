@@ -566,7 +566,7 @@ func (reconciler *ClusterReconciler) reconcileJob(ctx context.Context) (ctrl.Res
 		// Create Flink job submitter
 		log.Info("Updating job status to proceed creating new job submitter")
 		// Job status must be updated before creating a job submitter to ensure the observed job is the job submitted by the operator.
-		err = reconciler.updateJobDeployStatus(ctx)
+		newJobId, err := reconciler.updateJobDeployStatus(ctx)
 		if err != nil {
 			log.Info("Failed to update the job status for job submission")
 			return requeueResult, err
@@ -595,6 +595,9 @@ func (reconciler *ClusterReconciler) reconcileJob(ctx context.Context) (ctrl.Res
 				return requeueResult, nil
 			}
 		} else {
+			if newJobId != "" && IsApplicationModeCluster(observed.cluster) {
+				patchJobId(desiredJob, newJobId)
+			}
 			err = reconciler.createJob(ctx, desiredJob)
 		}
 
@@ -1068,11 +1071,12 @@ func (reconciler *ClusterReconciler) updateStatusWithJob(
 	}
 }
 
-func (reconciler *ClusterReconciler) updateJobDeployStatus(ctx context.Context) error {
+func (reconciler *ClusterReconciler) updateJobDeployStatus(ctx context.Context) (string, error) {
 	var log = logr.FromContextOrDiscard(ctx)
 	var observedCluster = reconciler.observed.cluster
 	var desiredJobSubmitter = reconciler.desired.Job
 	var newJob *v1beta1.JobStatus
+	var newJobId string
 	var key = types.NamespacedName{Namespace: observedCluster.Namespace, Name: observedCluster.Name}
 
 	var err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
@@ -1084,7 +1088,7 @@ func (reconciler *ClusterReconciler) updateJobDeployStatus(ctx context.Context) 
 		newJob = cluster.Status.Components.Job
 
 		// Reset running job information.
-		// newJob.ID = ""
+		newJobId = rotateJobIdIfNecessary(log, newJob, &cluster)
 		newJob.StartTime = ""
 		newJob.CompletionTime = nil
 
@@ -1107,7 +1111,42 @@ func (reconciler *ClusterReconciler) updateJobDeployStatus(ctx context.Context) 
 	} else {
 		log.Info("Succeeded to update job status for new job submitter.", "job status", newJob)
 	}
-	return err
+	return newJobId, err
+}
+
+// rotateJobIdIfNecessary generates a fresh job ID for Application-mode clusters when restoring
+// from a savepoint to avoid archive path conflicts. When no restore location is resolved and
+// no final savepoint was taken, the existing ID is preserved so Flink's HA recovery can find its
+// checkpoints.
+// Detached-mode clusters are skipped because Flink assigns its own job ID.
+func rotateJobIdIfNecessary(log logr.Logger, job *v1beta1.JobStatus, cluster *v1beta1.FlinkCluster) string {
+	if !IsApplicationModeCluster(cluster) {
+		return ""
+	}
+
+	restoreLocation := convertFromSavepoint(cluster.Spec.Job, job, &cluster.Status.Revision)
+
+	if !job.FinalSavepoint && restoreLocation == nil {
+		return ""
+	}
+	newJobId, _ := computeJobId(cluster)
+	if newJobId == "" || job.ID == newJobId {
+		return ""
+	}
+	job.ID = newJobId
+	log.Info("Job ID rotated for restore from savepoint", "oldJobId", job.ID, "newJobId", newJobId)
+	return newJobId
+}
+
+func patchJobId(job *batchv1.Job, newId string) {
+	job.Spec.Template.Labels[JobIdLabel] = newId
+	args := job.Spec.Template.Spec.Containers[0].Args
+	for i, arg := range args {
+		if arg == "--job-id" && i+1 < len(args) {
+			args[i+1] = newId
+			return
+		}
+	}
 }
 
 // getNewSavepointStatus returns newly triggered savepoint status.
