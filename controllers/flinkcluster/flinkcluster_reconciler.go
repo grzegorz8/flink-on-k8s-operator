@@ -1133,8 +1133,8 @@ func rotateJobIdIfNecessary(log logr.Logger, job *v1beta1.JobStatus, cluster *v1
 	if newJobId == "" || job.ID == newJobId {
 		return ""
 	}
-	job.ID = newJobId
 	log.Info("Job ID rotated for restore from savepoint", "oldJobId", job.ID, "newJobId", newJobId)
+	job.ID = newJobId
 	return newJobId
 }
 
