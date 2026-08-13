@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -595,8 +596,8 @@ func (reconciler *ClusterReconciler) reconcileJob(ctx context.Context) (ctrl.Res
 				return requeueResult, nil
 			}
 		} else {
-			if IsApplicationModeCluster(observed.cluster) && newJobId != "" {
-				patchJobId(desiredJob, newJobId)
+			if IsApplicationModeCluster(observed.cluster) {
+				patchExecutionIdentity(desiredJob, newJobId)
 			}
 			err = reconciler.createJob(ctx, desiredJob)
 		}
@@ -1119,9 +1120,10 @@ func (reconciler *ClusterReconciler) updateJobDeployStatus(ctx context.Context) 
 }
 
 // getNewJobIdIfNecessary returns a fresh job ID for Application-mode clusters when one is needed
-// to avoid archive path conflicts. HA clusters preserve the existing ID when no restore location
-// is resolved and no final savepoint was taken so Flink's HA recovery can find its checkpoints.
-// Detached-mode clusters are skipped because Flink assigns its own job ID.
+// to avoid archive path conflicts. For Flink 2.3 and later, the ID also serves as cluster.id. HA
+// clusters preserve the existing ID when no restore location is resolved and no final savepoint
+// was taken so Flink's HA recovery can find its checkpoints. Detached-mode clusters are skipped
+// because Flink assigns its own job ID.
 func getNewJobIdIfNecessary(job *v1beta1.JobStatus, cluster *v1beta1.FlinkCluster) string {
 	if !IsApplicationModeCluster(cluster) {
 		return ""
@@ -1139,7 +1141,10 @@ func getNewJobIdIfNecessary(job *v1beta1.JobStatus, cluster *v1beta1.FlinkCluste
 	return newJobId
 }
 
-func patchJobId(job *batchv1.Job, newId string) {
+func patchExecutionIdentity(job *batchv1.Job, newId string) {
+	if newId == "" {
+		return
+	}
 	if job.Labels == nil {
 		job.Labels = make(map[string]string)
 	}
@@ -1152,7 +1157,9 @@ func patchJobId(job *batchv1.Job, newId string) {
 	for i, arg := range args {
 		if arg == "--job-id" && i+1 < len(args) {
 			args[i+1] = newId
-			return
+		}
+		if strings.HasPrefix(arg, "-Dcluster.id=") {
+			args[i] = ("-Dcluster.id=") + newId
 		}
 	}
 }

@@ -19,6 +19,7 @@ package flinkcluster
 import (
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -325,6 +326,83 @@ func getDummyFlinkCluster() *v1beta1.FlinkCluster {
 		Status: v1beta1.FlinkClusterStatus{
 			Revision: v1beta1.RevisionStatus{NextRevision: "fjc-85dc8f749-1"},
 		},
+	}
+}
+
+func TestApplicationModeClusterIdArgument(t *testing.T) {
+	applicationMode := v1beta1.JobModeApplication
+	cluster := getDummyFlinkCluster()
+	cluster.Spec.Job.Mode = &applicationMode
+	cluster.Spec.FlinkVersion = "2.3"
+
+	job := newJob(cluster)
+	args := job.Spec.Template.Spec.Containers[0].Args
+	var jobId string
+	var clusterId string
+	for i, arg := range args {
+		if arg == "--job-id" && i+1 < len(args) {
+			jobId = args[i+1]
+		}
+		if strings.HasPrefix(arg, "-Dcluster.id=") {
+			clusterId = strings.TrimPrefix(arg, "-Dcluster.id=")
+		}
+	}
+
+	assert.Assert(t, jobId != "")
+	assert.Equal(t, clusterId, jobId)
+}
+
+func TestClusterIdArgumentGating(t *testing.T) {
+	applicationMode := v1beta1.JobModeApplication
+	detachedMode := v1beta1.JobModeDetached
+	tests := []struct {
+		name            string
+		flinkVersion    string
+		mode            *v1beta1.JobMode
+		flinkProperties map[string]string
+		removeJob       bool
+	}{
+		{name: "Flink 2.2", flinkVersion: "2.2", mode: &applicationMode},
+		{name: "Flink 1.15", flinkVersion: "1.15", mode: &applicationMode},
+		{name: "empty version", flinkVersion: "", mode: &applicationMode},
+		{name: "invalid version", flinkVersion: "garbage", mode: &applicationMode},
+		{
+			name:            "user-managed cluster id",
+			flinkVersion:    "2.3",
+			mode:            &applicationMode,
+			flinkProperties: map[string]string{clusterIdProperty: "user-managed-id"},
+		},
+		{name: "detached mode", flinkVersion: "2.3", mode: &detachedMode},
+		{name: "session cluster", flinkVersion: "2.3", removeJob: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cluster := getDummyFlinkCluster()
+			cluster.Spec.FlinkVersion = test.flinkVersion
+			cluster.Spec.FlinkProperties = test.flinkProperties
+			if test.removeJob {
+				cluster.Spec.Job = nil
+			} else {
+				cluster.Spec.Job.Mode = test.mode
+			}
+
+			assert.Assert(t, !shouldManageClusterId(cluster))
+			job := newJob(cluster)
+			if job != nil {
+				for _, arg := range job.Spec.Template.Spec.Containers[0].Args {
+					assert.Assert(t, !strings.HasPrefix(arg, "-Dcluster.id="))
+				}
+			}
+
+			if test.flinkProperties[clusterIdProperty] != "" {
+				configMap := newConfigMap(cluster)
+				assert.Assert(t, strings.Contains(
+					configMap.Data["config.yaml"],
+					clusterIdProperty+": "+test.flinkProperties[clusterIdProperty]+"\n",
+				))
+			}
+		})
 	}
 }
 

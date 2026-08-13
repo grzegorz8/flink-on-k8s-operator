@@ -58,6 +58,7 @@ const (
 	jobPyFilesUriEnvVar     = "FLINK_JOB_PY_FILES_URI"
 	hadoopConfDirEnvVar     = "HADOOP_CONF_DIR"
 	gacEnvVar               = "GOOGLE_APPLICATION_CREDENTIALS"
+	clusterIdProperty       = "cluster.id"
 )
 
 var (
@@ -73,7 +74,19 @@ var (
 	v10, _  = version.NewVersion("1.10")
 	v115, _ = version.NewVersion("1.15")
 	v20, _  = version.NewVersion("2.0")
+	v23, _  = version.NewVersion("2.3")
 )
+
+func shouldManageClusterId(flinkCluster *v1beta1.FlinkCluster) bool {
+	if !IsApplicationModeCluster(flinkCluster) {
+		return false
+	}
+	if _, configured := flinkCluster.Spec.FlinkProperties[clusterIdProperty]; configured {
+		return false
+	}
+	flinkVersion, err := version.NewVersion(flinkCluster.Spec.FlinkVersion)
+	return err == nil && !flinkVersion.LessThan(v23)
+}
 
 // Gets the desired state of a cluster.
 func getDesiredClusterState(observed *ObservedClusterState) *model.DesiredClusterState {
@@ -178,6 +191,9 @@ func newJobManagerContainer(flinkCluster *v1beta1.FlinkCluster, jobId string) *c
 		args := []string{"standalone-job"}
 		if parallelism, err := calJobParallelism(flinkCluster); err == nil {
 			args = append(args, fmt.Sprintf("-Dparallelism.default=%d", parallelism))
+		}
+		if shouldManageClusterId(flinkCluster) {
+			args = append(args, ("-Dcluster.id=")+jobId)
 		}
 
 		var fromSavepoint = convertFromSavepoint(jobSpec, status.Components.Job, &status.Revision)

@@ -735,6 +735,7 @@ func TestRotateJobIdOnExplicitFromSavepoint(t *testing.T) {
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{
 				Args: []string{
 					"standalone-job",
+					("-Dcluster.id=") + "old-job-id-that-should-be-rotated",
 					"--fromSavepoint", fromSavepoint,
 					"--job-id", "old-job-id-that-should-be-rotated",
 					"--job-classname", "com.example.Job",
@@ -767,12 +768,13 @@ func TestRotateJobIdOnExplicitFromSavepoint(t *testing.T) {
 	assert.Equal(t, updated.Status.Components.Job.ID, newJobId)
 
 	// when: the desired job is patched with the new job ID
-	patchJobId(desiredJob, newJobId)
+	patchExecutionIdentity(desiredJob, newJobId)
 
 	// then: the job label, pod template label, and submitter args are updated to the new ID
 	assert.Equal(t, desiredJob.Labels[JobIdLabel], newJobId)
 	assert.Equal(t, desiredJob.Spec.Template.Labels[JobIdLabel], newJobId)
-	assert.Equal(t, desiredJob.Spec.Template.Spec.Containers[0].Args[4], newJobId)
+	assert.Equal(t, desiredJob.Spec.Template.Spec.Containers[0].Args[1], ("-Dcluster.id=")+newJobId)
+	assert.Equal(t, desiredJob.Spec.Template.Spec.Containers[0].Args[5], newJobId)
 }
 
 func TestGetNewJobIdSkipsDetachedMode(t *testing.T) {
@@ -988,33 +990,61 @@ func TestComputeJobIdDiffersByRestartCount(t *testing.T) {
 	assert.Equal(t, len(secondAttemptId), 32)
 }
 
-func TestPatchJobId(t *testing.T) {
-	// given: a job whose labels and submitter args reference an old job ID
-	job := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Labels: map[string]string{JobIdLabel: "old-id"},
-		},
-		Spec: batchv1.JobSpec{
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						JobIdLabel: "old-id",
+func TestPatchExecutionIdentity(t *testing.T) {
+	newJob := func(includeClusterId bool) *batchv1.Job {
+		args := []string{"standalone-job", "--fromSavepoint", "gs://bucket/sp", "--job-id", "old-id", "--job-classname", "com.example.Job"}
+		if includeClusterId {
+			args = append(args[:1], append([]string{("-Dcluster.id=") + "old-id"}, args[1:]...)...)
+		}
+		return &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: map[string]string{JobIdLabel: "old-id"},
+			},
+			Spec: batchv1.JobSpec{
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							JobIdLabel: "old-id",
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Args: args,
+						}},
 					},
 				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Args: []string{"standalone-job", "--fromSavepoint", "gs://bucket/sp", "--job-id", "old-id", "--job-classname", "com.example.Job"},
-					}},
-				},
 			},
-		},
+		}
 	}
 
-	// when: patchJobId is called with a new job ID
-	patchJobId(job, "new-id-abc")
+	t.Run("rewrites both identifiers", func(t *testing.T) {
+		job := newJob(true)
 
-	// then: the job label, pod template label, and submitter args are updated to the new ID
-	assert.Equal(t, job.Labels[JobIdLabel], "new-id-abc")
-	assert.Equal(t, job.Spec.Template.Labels[JobIdLabel], "new-id-abc")
-	assert.Equal(t, job.Spec.Template.Spec.Containers[0].Args[4], "new-id-abc")
+		patchExecutionIdentity(job, "new-id-abc")
+
+		assert.Equal(t, job.Labels[JobIdLabel], "new-id-abc")
+		assert.Equal(t, job.Spec.Template.Labels[JobIdLabel], "new-id-abc")
+		assert.Equal(t, job.Spec.Template.Spec.Containers[0].Args[1], ("-Dcluster.id=")+"new-id-abc")
+		assert.Equal(t, job.Spec.Template.Spec.Containers[0].Args[5], "new-id-abc")
+	})
+
+	t.Run("does not append cluster id when absent", func(t *testing.T) {
+		job := newJob(false)
+
+		patchExecutionIdentity(job, "new-id-abc")
+
+		assert.Equal(t, job.Spec.Template.Spec.Containers[0].Args[4], "new-id-abc")
+		for _, arg := range job.Spec.Template.Spec.Containers[0].Args {
+			assert.Assert(t, !strings.HasPrefix(arg, "-Dcluster.id="))
+		}
+	})
+
+	t.Run("empty id leaves job unchanged", func(t *testing.T) {
+		job := newJob(true)
+		before := job.DeepCopy()
+
+		patchExecutionIdentity(job, "")
+
+		assert.DeepEqual(t, job, before)
+	})
 }
