@@ -725,6 +725,9 @@ func TestRotateJobIdOnExplicitFromSavepoint(t *testing.T) {
 		Build()
 
 	var desiredJob = &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{JobIdLabel: "old-job-id-that-should-be-rotated"},
+		},
 		Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{
 				Labels: map[string]string{JobIdLabel: "old-job-id-that-should-be-rotated"},
@@ -766,14 +769,14 @@ func TestRotateJobIdOnExplicitFromSavepoint(t *testing.T) {
 	// when: the desired job is patched with the new job ID
 	patchJobId(desiredJob, newJobId)
 
-	// then: the pod template label and submitter args are updated to the new ID
+	// then: the job label, pod template label, and submitter args are updated to the new ID
+	assert.Equal(t, desiredJob.Labels[JobIdLabel], newJobId)
 	assert.Equal(t, desiredJob.Spec.Template.Labels[JobIdLabel], newJobId)
 	assert.Equal(t, desiredJob.Spec.Template.Spec.Containers[0].Args[4], newJobId)
 }
 
-func TestRotateJobIdSkipsDetachedMode(t *testing.T) {
+func TestGetNewJobIdSkipsDetachedMode(t *testing.T) {
 	// given: a detached-mode job with an existing job ID and a final savepoint
-	log := logr.Discard()
 	var detachedMode = v1beta1.JobModeDetached
 	cluster := &v1beta1.FlinkCluster{
 		Spec: v1beta1.FlinkClusterSpec{
@@ -790,22 +793,86 @@ func TestRotateJobIdSkipsDetachedMode(t *testing.T) {
 		},
 	}
 
-	// when: rotateJobIdIfNecessary is called
-	result := rotateJobIdIfNecessary(log, cluster.Status.Components.Job, cluster)
+	// when: a new job ID is evaluated
+	result := getNewJobIdIfNecessary(cluster.Status.Components.Job, cluster)
 
 	// then: no rotation happens and the existing job ID is preserved
 	assert.Equal(t, result, "")
 	assert.Equal(t, cluster.Status.Components.Job.ID, "existing-id")
 }
 
-func TestRotateJobIdPreservesIdOnRecovery(t *testing.T) {
-	// given: an application-mode job recovering at the same revision (not restarting),
-	// with no final savepoint taken
-	log := logr.Discard()
+func TestGetNewJobIdForStatelessUpdateWithoutHA(t *testing.T) {
+	// given: a non-HA application-mode update with no savepoint to restore from
+	var applicationMode = v1beta1.JobModeApplication
+	cluster := &v1beta1.FlinkCluster{
+		ObjectMeta: metav1.ObjectMeta{UID: "cluster-uid"},
+		Spec: v1beta1.FlinkClusterSpec{
+			Job: &v1beta1.JobSpec{Mode: &applicationMode},
+		},
+		Status: v1beta1.FlinkClusterStatus{
+			Components: v1beta1.FlinkClusterComponentsStatus{
+				Job: &v1beta1.JobStatus{ID: "existing-id"},
+			},
+			Revision: v1beta1.RevisionStatus{
+				CurrentRevision: "cluster-abc-1",
+				NextRevision:    "cluster-def-2",
+			},
+		},
+	}
+	expectedJobId, err := computeJobId(cluster)
+	assert.NilError(t, err)
+
+	// when: a new job ID is evaluated
+	result := getNewJobIdIfNecessary(cluster.Status.Components.Job, cluster)
+
+	// then: a distinct ID is returned without mutating status
+	assert.Equal(t, result, expectedJobId)
+	assert.Equal(t, cluster.Status.Components.Job.ID, "existing-id")
+}
+
+func TestGetNewJobIdPreservesIdOnHAUpdateWithoutSavepoint(t *testing.T) {
+	// given: an HA application-mode update with no savepoint to restore from
 	var applicationMode = v1beta1.JobModeApplication
 	cluster := &v1beta1.FlinkCluster{
 		Spec: v1beta1.FlinkClusterSpec{
 			Job: &v1beta1.JobSpec{Mode: &applicationMode},
+			FlinkProperties: map[string]string{
+				"high-availability":            "kubernetes",
+				"kubernetes.cluster-id":        "cluster",
+				"high-availability.storageDir": "gs://bucket/ha",
+			},
+		},
+		Status: v1beta1.FlinkClusterStatus{
+			Components: v1beta1.FlinkClusterComponentsStatus{
+				Job: &v1beta1.JobStatus{ID: "existing-id"},
+			},
+			Revision: v1beta1.RevisionStatus{
+				CurrentRevision: "cluster-abc-1",
+				NextRevision:    "cluster-def-2",
+			},
+		},
+	}
+
+	// when: a new job ID is evaluated
+	result := getNewJobIdIfNecessary(cluster.Status.Components.Job, cluster)
+
+	// then: the existing ID is retained for HA checkpoint recovery
+	assert.Equal(t, result, "")
+	assert.Equal(t, cluster.Status.Components.Job.ID, "existing-id")
+}
+
+func TestGetNewJobIdPreservesIdOnHARecovery(t *testing.T) {
+	// given: an application-mode job recovering at the same revision (not restarting),
+	// with HA enabled and no final savepoint taken
+	var applicationMode = v1beta1.JobModeApplication
+	cluster := &v1beta1.FlinkCluster{
+		Spec: v1beta1.FlinkClusterSpec{
+			Job: &v1beta1.JobSpec{Mode: &applicationMode},
+			FlinkProperties: map[string]string{
+				"high-availability":            "kubernetes",
+				"kubernetes.cluster-id":        "cluster",
+				"high-availability.storageDir": "gs://bucket/ha",
+			},
 		},
 		Status: v1beta1.FlinkClusterStatus{
 			Components: v1beta1.FlinkClusterComponentsStatus{
@@ -821,8 +888,8 @@ func TestRotateJobIdPreservesIdOnRecovery(t *testing.T) {
 		},
 	}
 
-	// when: rotateJobIdIfNecessary is called
-	result := rotateJobIdIfNecessary(log, cluster.Status.Components.Job, cluster)
+	// when: a new job ID is evaluated
+	result := getNewJobIdIfNecessary(cluster.Status.Components.Job, cluster)
 
 	// then: no rotation happens and the existing job ID is preserved
 	assert.Equal(t, result, "")
@@ -890,9 +957,43 @@ func TestGenJobIdDiffersByClusterUID(t *testing.T) {
 	assert.Assert(t, id1 != id2)
 }
 
+func TestComputeJobIdDiffersByRestartCount(t *testing.T) {
+	// given: two attempts of the same revision restoring from the same savepoint
+	cluster := &v1beta1.FlinkCluster{
+		ObjectMeta: metav1.ObjectMeta{UID: "cluster-uid"},
+		Spec: v1beta1.FlinkClusterSpec{
+			Job: &v1beta1.JobSpec{},
+		},
+		Status: v1beta1.FlinkClusterStatus{
+			Revision: v1beta1.RevisionStatus{NextRevision: "cluster-revision-1"},
+			Components: v1beta1.FlinkClusterComponentsStatus{
+				Job: &v1beta1.JobStatus{
+					SavepointLocation: "gs://bucket/sp-1",
+					RestartCount:      1,
+				},
+			},
+		},
+	}
+	firstAttemptId, err := computeJobId(cluster)
+	assert.NilError(t, err)
+
+	// when: the trusted restart count advances
+	cluster.Status.Components.Job.RestartCount++
+	secondAttemptId, err := computeJobId(cluster)
+	assert.NilError(t, err)
+
+	// then: the logical deployment gets a distinct deterministic ID
+	assert.Assert(t, firstAttemptId != secondAttemptId)
+	assert.Equal(t, len(firstAttemptId), 32)
+	assert.Equal(t, len(secondAttemptId), 32)
+}
+
 func TestPatchJobId(t *testing.T) {
-	// given: a job whose pod template label and submitter args reference an old job ID
+	// given: a job whose labels and submitter args reference an old job ID
 	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{JobIdLabel: "old-id"},
+		},
 		Spec: batchv1.JobSpec{
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
@@ -912,7 +1013,8 @@ func TestPatchJobId(t *testing.T) {
 	// when: patchJobId is called with a new job ID
 	patchJobId(job, "new-id-abc")
 
-	// then: the pod template label and submitter args are updated to the new ID
+	// then: the job label, pod template label, and submitter args are updated to the new ID
+	assert.Equal(t, job.Labels[JobIdLabel], "new-id-abc")
 	assert.Equal(t, job.Spec.Template.Labels[JobIdLabel], "new-id-abc")
 	assert.Equal(t, job.Spec.Template.Spec.Containers[0].Args[4], "new-id-abc")
 }

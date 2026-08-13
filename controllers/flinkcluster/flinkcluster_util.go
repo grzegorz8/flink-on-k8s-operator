@@ -597,13 +597,17 @@ func computeJobId(cluster *v1beta1.FlinkCluster) (string, error) {
 	}
 
 	savepointLocation := ""
+	restartCount := int32(0)
 	if cluster.Spec.Job != nil {
 		restoreLocation := convertFromSavepoint(cluster.Spec.Job, cluster.Status.Components.Job, &cluster.Status.Revision)
 		if restoreLocation != nil {
 			savepointLocation = *restoreLocation
 		}
 	}
-	data := fmt.Sprintf("%s-%s-%s", cluster.UID, cluster.Status.Revision.NextRevision, savepointLocation)
+	if cluster.Status.Components.Job != nil {
+		restartCount = cluster.Status.Components.Job.RestartCount
+	}
+	data := fmt.Sprintf("%s-%s-%s-%d", cluster.UID, cluster.Status.Revision.NextRevision, savepointLocation, restartCount)
 	hash := md5.Sum([]byte(data))
 	return hex.EncodeToString(hash[:]), nil
 }

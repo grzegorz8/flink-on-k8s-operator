@@ -595,7 +595,7 @@ func (reconciler *ClusterReconciler) reconcileJob(ctx context.Context) (ctrl.Res
 				return requeueResult, nil
 			}
 		} else {
-			if newJobId != "" && IsApplicationModeCluster(observed.cluster) {
+			if IsApplicationModeCluster(observed.cluster) && newJobId != "" {
 				patchJobId(desiredJob, newJobId)
 			}
 			err = reconciler.createJob(ctx, desiredJob)
@@ -1088,7 +1088,11 @@ func (reconciler *ClusterReconciler) updateJobDeployStatus(ctx context.Context) 
 		newJob = cluster.Status.Components.Job
 
 		// Reset running job information.
-		newJobId = rotateJobIdIfNecessary(log, newJob, &cluster)
+		newJobId = getNewJobIdIfNecessary(newJob, &cluster)
+		if newJobId != "" {
+			log.Info("Job ID rotated for deployment", "oldJobId", newJob.ID, "newJobId", newJobId)
+			newJob.ID = newJobId
+		}
 		newJob.StartTime = ""
 		newJob.CompletionTime = nil
 
@@ -1114,31 +1118,35 @@ func (reconciler *ClusterReconciler) updateJobDeployStatus(ctx context.Context) 
 	return newJobId, err
 }
 
-// rotateJobIdIfNecessary generates a fresh job ID for Application-mode clusters when restoring
-// from a savepoint to avoid archive path conflicts. When no restore location is resolved and
-// no final savepoint was taken, the existing ID is preserved so Flink's HA recovery can find its
-// checkpoints.
+// getNewJobIdIfNecessary returns a fresh job ID for Application-mode clusters when one is needed
+// to avoid archive path conflicts. HA clusters preserve the existing ID when no restore location
+// is resolved and no final savepoint was taken so Flink's HA recovery can find its checkpoints.
 // Detached-mode clusters are skipped because Flink assigns its own job ID.
-func rotateJobIdIfNecessary(log logr.Logger, job *v1beta1.JobStatus, cluster *v1beta1.FlinkCluster) string {
+func getNewJobIdIfNecessary(job *v1beta1.JobStatus, cluster *v1beta1.FlinkCluster) string {
 	if !IsApplicationModeCluster(cluster) {
 		return ""
 	}
 
 	restoreLocation := convertFromSavepoint(cluster.Spec.Job, job, &cluster.Status.Revision)
 
-	if !job.FinalSavepoint && restoreLocation == nil {
+	if cluster.IsHighAvailabilityEnabled() && !job.FinalSavepoint && restoreLocation == nil {
 		return ""
 	}
 	newJobId, _ := computeJobId(cluster)
 	if newJobId == "" || job.ID == newJobId {
 		return ""
 	}
-	log.Info("Job ID rotated for restore from savepoint", "oldJobId", job.ID, "newJobId", newJobId)
-	job.ID = newJobId
 	return newJobId
 }
 
 func patchJobId(job *batchv1.Job, newId string) {
+	if job.Labels == nil {
+		job.Labels = make(map[string]string)
+	}
+	if job.Spec.Template.Labels == nil {
+		job.Spec.Template.Labels = make(map[string]string)
+	}
+	job.Labels[JobIdLabel] = newId
 	job.Spec.Template.Labels[JobIdLabel] = newId
 	args := job.Spec.Template.Spec.Containers[0].Args
 	for i, arg := range args {
