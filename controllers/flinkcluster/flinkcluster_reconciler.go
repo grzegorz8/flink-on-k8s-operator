@@ -77,14 +77,24 @@ func (reconciler *ClusterReconciler) reconcile(ctx context.Context) (ctrl.Result
 		return ctrl.Result{}, nil
 	}
 
-	if reconciler.observed.cluster.IsHighAvailabilityEnabled() {
-		if err := reconciler.ensureFinalizer(ctx); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
+	// Handle deletion before ensuring the finalizer so manual removal remains a reliable escape
+	// hatch when deletion cannot complete normally.
 	if reconciler.observed.cluster.DeletionTimestamp != nil {
 		return reconciler.reconcileDeletion(ctx)
+	}
+
+	if reconciler.observed.cluster.IsHighAvailabilityEnabled() {
+		added, err := reconciler.ensureFinalizer(ctx)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if added {
+			// The patch bumps the object's resourceVersion and enqueues a watch event. Return
+			// before taking any Flink-side action so that the reconcile scheduled by this write
+			// cannot observe a status that predates an action taken after it.
+			log.Info("Added JobManager shutdown finalizer, waiting for the change to settle")
+			return ctrl.Result{Requeue: true, RequeueAfter: 5 * time.Second}, nil
+		}
 	}
 
 	if shouldUpdateCluster(&reconciler.observed) {
@@ -224,16 +234,19 @@ func (reconciler *ClusterReconciler) jobManagerPodsRemaining(ctx context.Context
 	return len(podList.Items) > 0, nil
 }
 
-// ensureFinalizer adds the JobManager shutdown finalizer to HA-enabled clusters that don't already
-// have it.
-func (reconciler *ClusterReconciler) ensureFinalizer(ctx context.Context) error {
+// ensureFinalizer adds the JobManager shutdown finalizer to HA-enabled clusters that don't
+// already have it. It reports whether a write was actually issued.
+func (reconciler *ClusterReconciler) ensureFinalizer(ctx context.Context) (bool, error) {
 	cluster := reconciler.observed.cluster
-	if controllerutil.ContainsFinalizer(cluster, jobManagerShutdownFinalizer) {
-		return nil
+	if cluster.DeletionTimestamp != nil || controllerutil.ContainsFinalizer(cluster, jobManagerShutdownFinalizer) {
+		return false, nil
 	}
-	patch := client.MergeFrom(cluster.DeepCopy())
-	controllerutil.AddFinalizer(cluster, jobManagerShutdownFinalizer)
-	return reconciler.k8sClient.Patch(ctx, cluster, patch)
+	updated := cluster.DeepCopy()
+	controllerutil.AddFinalizer(updated, jobManagerShutdownFinalizer)
+	if err := reconciler.k8sClient.Patch(ctx, updated, client.MergeFrom(cluster)); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (reconciler *ClusterReconciler) reconcileBatchScheduler() error {
