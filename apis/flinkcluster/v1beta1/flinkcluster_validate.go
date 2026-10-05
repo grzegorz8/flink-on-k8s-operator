@@ -19,6 +19,7 @@ package v1beta1
 import (
 	"encoding/json"
 	"fmt"
+	"path"
 	"reflect"
 	"strconv"
 	"strings"
@@ -81,6 +82,10 @@ func (v *Validator) ValidateCreate(cluster *FlinkCluster) error {
 	if err != nil {
 		return err
 	}
+	err = v.validateAutoscaler(&cluster.Spec)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -108,6 +113,14 @@ func (v *Validator) ValidateUpdate(old *FlinkCluster, new *FlinkCluster) error {
 	}
 	if savepointGenUpdated {
 		return nil
+	}
+
+	// Autoscaler-only edits should not update the Flink job.
+	// Control and savepoint-generation checks above still apply.
+	oldFlinkSpec, newFlinkSpec := old.Spec, new.Spec
+	oldFlinkSpec.Autoscaler, newFlinkSpec.Autoscaler = nil, nil
+	if reflect.DeepEqual(oldFlinkSpec, newFlinkSpec) {
+		return v.validateAutoscaler(&new.Spec)
 	}
 
 	err = v.validateTaskManagerUpdate(old, new)
@@ -562,6 +575,43 @@ func (v *Validator) validateMemoryOffHeapMin(
 		if offHeapMin.Value() > memoryLimit.Value() {
 			return fmt.Errorf("invalid %v memory configuration, memory limit must be larger than MemoryOffHeapMin, "+
 				"memory limit: %d bytes, memoryOffHeapMin: %d bytes", component, memoryLimit.Value(), offHeapMin.Value())
+		}
+	}
+	return nil
+}
+
+// validateAutoscaler checks eligibility and fields required by the operator's
+// managed autoscaler configuration mount.
+func (v *Validator) validateAutoscaler(spec *FlinkClusterSpec) error {
+	if spec.Autoscaler == nil {
+		return nil
+	}
+	if spec.Job == nil || spec.Job.Mode == nil || *spec.Job.Mode != JobModeApplication {
+		return fmt.Errorf("spec.autoscaler requires spec.job.mode: Application")
+	}
+	if spec.FlinkProperties["execution.runtime-mode"] != "STREAMING" {
+		return fmt.Errorf("spec.autoscaler requires explicit execution.runtime-mode: STREAMING")
+	}
+	if spec.TaskManager != nil && spec.TaskManager.HorizontalPodAutoscaler != nil {
+		return fmt.Errorf("spec.autoscaler cannot be enabled with TaskManager horizontalPodAutoscaler")
+	}
+	pod := &spec.Autoscaler.PodTemplate.Spec
+	if len(pod.Containers) == 0 {
+		return fmt.Errorf("spec.autoscaler.podTemplate requires at least one container")
+	}
+	for _, volume := range pod.Volumes {
+		if volume.Name == "autoscaler-config" {
+			return fmt.Errorf("spec.autoscaler.podTemplate volume name autoscaler-config is reserved")
+		}
+	}
+	for _, container := range pod.Containers {
+		if strings.TrimSpace(container.Image) == "" {
+			return fmt.Errorf("spec.autoscaler.podTemplate container %q requires an image", container.Name)
+		}
+		for _, mount := range container.VolumeMounts {
+			if mount.Name == "autoscaler-config" || path.Clean(mount.MountPath) == "/opt/flink/conf/config.yaml" {
+				return fmt.Errorf("spec.autoscaler.podTemplate container %q conflicts with managed autoscaler-config mount", container.Name)
+			}
 		}
 	}
 	return nil

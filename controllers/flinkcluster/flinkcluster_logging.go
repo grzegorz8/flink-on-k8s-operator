@@ -65,6 +65,8 @@ func logObservedClusterStateSummary(observed *ObservedClusterState) map[string]a
 		"jobSubmitterPod":           logObjectSummary(observed.flinkJobSubmitter.pod),
 		"jobSubmitterLog":           logSubmitterLogSummary(observed.flinkJobSubmitter.log),
 		"savepoint":                 logFlinkSavepointSummary(observed.savepoint.status, observed.savepoint.error),
+		"autoscalerConfigMap":       logObjectSummary(observed.autoscalerConfigMap),
+		"autoscalerDeployment":      logObjectSummary(observed.autoscalerDeployment),
 	}
 	if observed.persistentVolumeClaims != nil {
 		summary["persistentVolumeClaimCount"] = len(observed.persistentVolumeClaims.Items)
@@ -90,6 +92,8 @@ func logDesiredClusterStateSummary(desired *model.DesiredClusterState) map[strin
 		"taskManagerService":      logObjectSummary(desired.TmService),
 		"horizontalPodAutoscaler": logObjectSummary(desired.HorizontalPodAutoscaler),
 		"job":                     logObjectSummary(desired.Job),
+		"autoscalerConfigMap":     logObjectSummary(desired.AutoscalerConfigMap),
+		"autoscalerDeployment":    logObjectSummary(desired.AutoscalerDeployment),
 	}
 }
 
@@ -102,6 +106,8 @@ func logObservedClusterStateFull(observed *ObservedClusterState) map[string]any 
 		"cluster":                 logFullObject(observed.cluster),
 		"controllerRevisions":     observed.revisions,
 		"configMap":               logFullObject(observed.configMap),
+		"autoscalerConfigMap":     logFullObject(observed.autoscalerConfigMap),
+		"autoscalerDeployment":    logFullObject(observed.autoscalerDeployment),
 		"flinkNativeConfigMaps":   logFlinkNativeConfigMapNames(observed.flinkNativeConfigMaps),
 		"podDisruptionBudget":     logFullObject(observed.podDisruptionBudget),
 		"jobManagerStatefulSet":   logFullObject(observed.jmStatefulSet),
@@ -144,6 +150,8 @@ func logDesiredClusterStateFull(desired *model.DesiredClusterState) map[string]a
 		"taskManagerService":      logFullObject(desired.TmService),
 		"horizontalPodAutoscaler": logFullObject(desired.HorizontalPodAutoscaler),
 		"job":                     logFullObject(desired.Job),
+		"autoscalerConfigMap":     logFullObject(desired.AutoscalerConfigMap),
+		"autoscalerDeployment":    logFullObject(desired.AutoscalerDeployment),
 	}
 }
 

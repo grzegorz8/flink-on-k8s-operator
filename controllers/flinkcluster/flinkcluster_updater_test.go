@@ -309,3 +309,123 @@ func TestStoppedApplicationClusterRecoversFromActiveJob(t *testing.T) {
 		})
 	}
 }
+
+func TestAutoscalerStatusConfiguredWithoutDeployment(t *testing.T) {
+	// given: a configured autoscaler with no observed Deployment
+	cluster := autoscalerTestCluster()
+	updater := ClusterStatusUpdater{observed: ObservedClusterState{cluster: cluster}}
+
+	// when: autoscaler status is derived
+	status := updater.deriveAutoscalerStatus()
+
+	// then: the autoscaler is not ready
+	assert.Assert(t, status != nil)
+	assert.Equal(t, status.State, v1beta1.ComponentStateNotReady)
+}
+
+func TestAutoscalerStatusOmittedWithoutHistory(t *testing.T) {
+	// given: no autoscaler configuration, no prior status, no observed Deployment
+	cluster := autoscalerTestCluster()
+	cluster.Spec.Autoscaler = nil
+	updater := ClusterStatusUpdater{observed: ObservedClusterState{cluster: cluster}}
+
+	// when: autoscaler status is derived
+	status := updater.deriveAutoscalerStatus()
+
+	// then: autoscaler status is absent
+	assert.Assert(t, status == nil)
+}
+
+func TestAutoscalerStatusOmittedAfterRemoval(t *testing.T) {
+	// given: a removed autoscaler with prior status and no observed Deployment
+	cluster := autoscalerTestCluster()
+	cluster.Spec.Autoscaler = nil
+	cluster.Status.Components.Autoscaler = &v1beta1.AutoscalerStatus{
+		Name:  "example-autoscaler",
+		State: v1beta1.ComponentStateReady,
+	}
+	updater := ClusterStatusUpdater{observed: ObservedClusterState{cluster: cluster}}
+
+	// when: autoscaler status is derived
+	status := updater.deriveAutoscalerStatus()
+
+	// then: autoscaler status is removed
+	assert.Assert(t, status == nil)
+}
+
+func TestAutoscalerStatusReady(t *testing.T) {
+	// given: a Deployment with current generation and ready updated replicas
+	cluster := autoscalerTestCluster()
+	_, dep, err := autoscalerTestResources(cluster)
+	assert.NilError(t, err)
+	dep.Generation = 2
+	dep.Status = appsv1.DeploymentStatus{ObservedGeneration: 2, UpdatedReplicas: 1, ReadyReplicas: 1}
+	updater := ClusterStatusUpdater{observed: ObservedClusterState{
+		cluster:              cluster,
+		autoscalerDeployment: dep,
+	}}
+
+	// when: autoscaler status is derived
+	status := updater.deriveAutoscalerStatus()
+
+	// then: the autoscaler is ready
+	assert.Equal(t, status.State, v1beta1.ComponentStateReady)
+}
+
+func TestAutoscalerStatusUpdating(t *testing.T) {
+	// given: a ready Deployment using the previous autoscaler configuration
+	cluster := autoscalerTestCluster()
+	_, dep, err := autoscalerTestResources(cluster)
+	assert.NilError(t, err)
+	dep.Generation = 1
+	dep.Status = appsv1.DeploymentStatus{ObservedGeneration: 1, UpdatedReplicas: 1, ReadyReplicas: 1}
+	updater := ClusterStatusUpdater{observed: ObservedClusterState{
+		cluster:              cluster,
+		autoscalerDeployment: dep,
+	}}
+
+	// when: the requested autoscaler configuration changes
+	cluster.Spec.Autoscaler.AutoscalerProperties = map[string]string{"key": "new-value"}
+	status := updater.deriveAutoscalerStatus()
+
+	// then: the autoscaler is updating even though the old Deployment is ready
+	assert.Equal(t, status.State, v1beta1.ComponentStateUpdating)
+}
+
+func TestAutoscalerStatusStaleGeneration(t *testing.T) {
+	// given: ready replicas from a Deployment generation not yet observed
+	cluster := autoscalerTestCluster()
+	_, dep, err := autoscalerTestResources(cluster)
+	assert.NilError(t, err)
+	dep.Generation = 2
+	dep.Status = appsv1.DeploymentStatus{ObservedGeneration: 1, UpdatedReplicas: 1, ReadyReplicas: 1}
+	updater := ClusterStatusUpdater{observed: ObservedClusterState{
+		cluster:              cluster,
+		autoscalerDeployment: dep,
+	}}
+
+	// when: autoscaler status is derived
+	status := updater.deriveAutoscalerStatus()
+
+	// then: the autoscaler is not ready until the current generation is observed
+	assert.Equal(t, status.State, v1beta1.ComponentStateNotReady)
+}
+
+func TestAutoscalerStatusUnreadyReplicas(t *testing.T) {
+	// given: an updated Deployment whose replica is not ready
+	cluster := autoscalerTestCluster()
+	_, dep, err := autoscalerTestResources(cluster)
+	assert.NilError(t, err)
+	dep.Generation = 2
+	dep.Status = appsv1.DeploymentStatus{ObservedGeneration: 2, UpdatedReplicas: 1, ReadyReplicas: 0}
+	updater := ClusterStatusUpdater{observed: ObservedClusterState{
+		cluster:              cluster,
+		autoscalerDeployment: dep,
+	}}
+
+	// when: autoscaler status is derived
+	status := updater.deriveAutoscalerStatus()
+
+	// then: the autoscaler is not ready
+	assert.Equal(t, status.State, v1beta1.ComponentStateNotReady)
+}

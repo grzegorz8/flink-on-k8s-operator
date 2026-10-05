@@ -368,3 +368,21 @@ func TestSetNonDefault(t *testing.T) {
 		expectedCluster,
 		cmpopts.IgnoreUnexported(resource.Quantity{}))
 }
+
+func TestAutoscalerPodTemplateDefaults(t *testing.T) {
+	// given: an autoscaler template with omitted runtime defaults
+	cluster := newAutoscalerValidationCluster()
+	cluster.Spec.Autoscaler.PodTemplate.Spec = corev1.PodSpec{
+		Containers:     []corev1.Container{{Name: "autoscaler", Image: "example/autoscaler:1"}},
+		InitContainers: []corev1.Container{{Name: "init", Image: "example/init:1"}},
+	}
+
+	// when: webhook defaulting is applied
+	_SetDefault(cluster)
+
+	// then: image-pull defaults are populated
+	pod := &cluster.Spec.Autoscaler.PodTemplate.Spec
+	if pod.Containers[0].ImagePullPolicy != corev1.PullIfNotPresent || pod.InitContainers[0].ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Fatalf("unexpected image pull defaults: containers=%q initContainers=%q", pod.Containers[0].ImagePullPolicy, pod.InitContainers[0].ImagePullPolicy)
+	}
+}

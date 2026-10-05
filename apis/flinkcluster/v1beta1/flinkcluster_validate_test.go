@@ -930,3 +930,206 @@ func TestFlinkClusterValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateAutoscaler(t *testing.T) {
+	tests := []struct {
+		name         string
+		change       func(*FlinkCluster)
+		wantErr      bool
+		errorMessage string
+	}{
+		{
+			name: "omitted",
+			change: func(c *FlinkCluster) {
+				c.Spec.Autoscaler = nil
+				c.Spec.Job = nil
+			},
+			wantErr: false,
+		},
+		{
+			name: "session mode",
+			change: func(c *FlinkCluster) {
+				c.Spec.Job = nil
+			},
+			wantErr:      true,
+			errorMessage: "expected Application mode",
+		},
+		{
+			name: "omitted mode",
+			change: func(c *FlinkCluster) {
+				c.Spec.Job.Mode = nil
+			},
+			wantErr:      true,
+			errorMessage: "expected Application mode",
+		},
+		{
+			name: "detached mode",
+			change: func(c *FlinkCluster) {
+				mode := JobModeDetached
+				c.Spec.Job.Mode = &mode
+			},
+			wantErr:      true,
+			errorMessage: "expected Application mode",
+		},
+		{
+			name: "omitted runtime mode",
+			change: func(c *FlinkCluster) {
+				c.Spec.FlinkProperties = nil
+			},
+			wantErr:      true,
+			errorMessage: "expected explicit STREAMING runtime mode",
+		},
+		{
+			name: "batch runtime mode",
+			change: func(c *FlinkCluster) {
+				c.Spec.FlinkProperties["execution.runtime-mode"] = "BATCH"
+			},
+			wantErr:      true,
+			errorMessage: "expected explicit STREAMING runtime mode",
+		},
+		{
+			name: "automatic runtime mode",
+			change: func(c *FlinkCluster) {
+				c.Spec.FlinkProperties["execution.runtime-mode"] = "AUTOMATIC"
+			},
+			wantErr:      true,
+			errorMessage: "expected explicit STREAMING runtime mode",
+		},
+		{
+			name: "HPA conflict",
+			change: func(c *FlinkCluster) {
+				c.Spec.TaskManager = &TaskManagerSpec{
+					HorizontalPodAutoscaler: &HorizontalPodAutoscalerSpec{},
+				}
+			},
+			wantErr: true,
+			errorMessage: "expected autoscaler and TaskManager horizontalPodAutoscaler " +
+				"to be mutually exclusive",
+		},
+		{
+			name: "missing containers",
+			change: func(c *FlinkCluster) {
+				c.Spec.Autoscaler.PodTemplate.Spec.Containers = nil
+			},
+			wantErr:      true,
+			errorMessage: "expected at least one autoscaler container",
+		},
+		{
+			name: "missing image",
+			change: func(c *FlinkCluster) {
+				c.Spec.Autoscaler.PodTemplate.Spec.Containers[0].Image = ""
+			},
+			wantErr:      true,
+			errorMessage: "expected an image for each autoscaler container",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// given: a template with the scenario's eligibility or Pod configuration
+			cluster := newAutoscalerValidationCluster()
+			tt.change(cluster)
+
+			// when: autoscaler admission validation runs
+			err := (&Validator{}).validateAutoscaler(&cluster.Spec)
+
+			// then: admission reports the expected result
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("unexpected validation error: %v", err)
+				}
+			} else if err == nil {
+				t.Fatalf("%s: validation unexpectedly succeeded", tt.errorMessage)
+			}
+		})
+	}
+}
+
+func TestAutoscalerCreateAdmission(t *testing.T) {
+	// given: an Application cluster with an invalid autoscaler container
+	cluster := newAutoscalerValidationCluster()
+	cluster.Spec.Autoscaler.PodTemplate.Spec.Containers[0].Image = ""
+
+	// when: full create admission validation runs
+	err := (&Validator{}).ValidateCreate(cluster)
+
+	// then: the autoscaler validation is included in admission
+	if err == nil || !strings.Contains(err.Error(), "requires an image") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAutoscalerUpdateAdmission(t *testing.T) {
+	tests := []struct {
+		name         string
+		change       func(*FlinkCluster)
+		wantErr      bool
+		errorMessage string
+	}{
+		{
+			name: "update properties",
+			change: func(c *FlinkCluster) {
+				c.Spec.Autoscaler.AutoscalerProperties = map[string]string{"key": "value"}
+			},
+			wantErr: false,
+		},
+		{
+			name: "update Pod template",
+			change: func(c *FlinkCluster) {
+				c.Spec.Autoscaler.PodTemplate.Spec.Containers[0].Image = "example/autoscaler:2"
+			},
+			wantErr: false,
+		},
+		{
+			name: "remove autoscaler",
+			change: func(c *FlinkCluster) {
+				c.Spec.Autoscaler = nil
+			},
+			wantErr: false,
+		},
+		{
+			name: "reject missing image",
+			change: func(c *FlinkCluster) {
+				c.Spec.Autoscaler.PodTemplate.Spec.Containers[0].Image = ""
+			},
+			wantErr:      true,
+			errorMessage: "expected an image for each autoscaler container",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// given: a streaming Application cluster with an autoscaler
+			old := newAutoscalerValidationCluster()
+			updated := old.DeepCopy()
+
+			// when: the autoscaler configuration is changed and validated
+			tt.change(updated)
+			err := (&Validator{}).ValidateUpdate(old, updated)
+
+			// then: valid autoscaler changes are accepted and invalid configuration is rejected
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("unexpected validation error: %v", err)
+				}
+			} else if err == nil {
+				t.Fatalf("%s: validation unexpectedly succeeded", tt.errorMessage)
+			}
+		})
+	}
+}
+
+func newAutoscalerValidationCluster() *FlinkCluster {
+	mode := JobModeApplication
+	restart := JobRestartPolicyNever
+	return &FlinkCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "streaming", Namespace: "default"},
+		Spec: FlinkClusterSpec{
+			Job:             &JobSpec{Mode: &mode, RestartPolicy: &restart},
+			FlinkProperties: map[string]string{"execution.runtime-mode": "STREAMING"},
+			Autoscaler: &AutoscalerSpec{
+				PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "autoscaler", Image: "example/autoscaler:1"}},
+				}},
+			},
+		},
+	}
+}

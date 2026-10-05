@@ -1,0 +1,104 @@
+# Copyright 2019 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# These RBAC resources are examples for a scaler that reads one named
+# FlinkCluster and applies scaling through its /scale subresource. Adapt the
+# namespace and permissions to the behavior of your scaler image.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flink-autoscaler
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flink-autoscaler
+  namespace: default
+rules:
+  - apiGroups: [flinkoperator.k8s.io]
+    resources: [flinkclusters]
+    resourceNames: [flinkjobcluster-autoscaler-sample]
+    verbs: [get]
+  - apiGroups: [flinkoperator.k8s.io]
+    resources: [flinkclusters/scale]
+    resourceNames: [flinkjobcluster-autoscaler-sample]
+    verbs: [get, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flink-autoscaler
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: flink-autoscaler
+    namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: flink-autoscaler
+---
+apiVersion: flinkoperator.k8s.io/v1beta1
+kind: FlinkCluster
+metadata:
+  name: flinkjobcluster-autoscaler-sample
+  namespace: default
+spec:
+  flinkVersion: "2.2.1"
+  image:
+    name: flink:2.2.1
+  jobManager:
+    accessScope: Cluster
+    ports:
+      ui: 8081
+    resources:
+      limits:
+        memory: "2048Mi"
+        cpu: "500m"
+  taskManager:
+    replicas: 2
+    resources:
+      limits:
+        memory: "2048Mi"
+        cpu: "500m"
+  job:
+    mode: Application
+    jarFile: ./examples/streaming/WordCount.jar
+    className: org.apache.flink.streaming.examples.wordcount.WordCount
+    args: ["--input", "./README.txt"]
+    parallelism: 2
+    restartPolicy: Never
+  flinkProperties:
+    taskmanager.numberOfTaskSlots: "1"
+    execution.runtime-mode: STREAMING
+  autoscaler:
+    podTemplate:
+      spec:
+        serviceAccountName: flink-autoscaler
+        containers:
+          - name: autoscaler
+            image: REPLACE_WITH_YOUR_AUTOSCALER_IMAGE
+            imagePullPolicy: IfNotPresent
+            resources:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+              limits:
+                cpu: 500m
+                memory: 512Mi
+    autoscalerProperties:
+      # Property names and values are interpreted by the image above.
+      # Replace this example entry with that image's documented settings.
+      example.setting: "replace-with-image-specific-value"

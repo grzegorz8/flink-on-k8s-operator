@@ -166,6 +166,11 @@ func (reconciler *ClusterReconciler) reconcile(ctx context.Context) (ctrl.Result
 		return ctrl.Result{}, err
 	}
 
+	err = reconciler.reconcileAutoscaler(ctx)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	return result, nil
 }
 
@@ -344,6 +349,66 @@ func (reconciler *ClusterReconciler) reconcileHorizontalPodAutoscaler(ctx contex
 		"HorizontalPodAutoscaler",
 		reconciler.desired.HorizontalPodAutoscaler,
 		reconciler.observed.horizontalPodAutoscaler)
+}
+
+func (reconciler *ClusterReconciler) reconcileAutoscaler(ctx context.Context) error {
+	var desiredConfig = reconciler.desired.AutoscalerConfigMap
+	var observedConfig = reconciler.observed.autoscalerConfigMap
+	var desiredDeployment = reconciler.desired.AutoscalerDeployment
+	var observedDeployment = reconciler.observed.autoscalerDeployment
+
+	cluster := reconciler.observed.cluster
+	if cluster == nil || !cluster.DeletionTimestamp.IsZero() {
+		return nil
+	}
+	if err := reconciler.reconcileAutoscalerComponent(ctx, desiredConfig, observedConfig); err != nil {
+		return err
+	}
+	return reconciler.reconcileAutoscalerComponent(ctx, desiredDeployment, observedDeployment)
+}
+
+func (reconciler *ClusterReconciler) reconcileAutoscalerComponent(ctx context.Context, desired, observed client.Object) error {
+	if reflect.ValueOf(observed).IsNil() {
+		if reflect.ValueOf(desired).IsNil() {
+			return nil
+		}
+		return reconciler.createComponent(ctx, desired, "Autoscaler")
+	}
+	if reflect.ValueOf(desired).IsNil() {
+		return reconciler.deleteComponent(ctx, observed, "Autoscaler")
+	}
+
+	// Update the component if needed.
+	checksum := desired.GetAnnotations()[autoscalerSpecHashAnnotation]
+	if !observed.GetDeletionTimestamp().IsZero() || observed.GetAnnotations()[autoscalerSpecHashAnnotation] == checksum {
+		return nil
+	}
+	updated := observed.DeepCopyObject().(client.Object)
+	switch resource := updated.(type) {
+	case *corev1.ConfigMap:
+		resource.Data, resource.BinaryData = desired.(*corev1.ConfigMap).Data, nil
+	case *appsv1.Deployment:
+		resource.Spec = desired.(*appsv1.Deployment).Spec
+	}
+	mergeAutoscalerLabels(updated, desired.GetLabels())
+	annotations := updated.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[autoscalerSpecHashAnnotation] = checksum
+	updated.SetAnnotations(annotations)
+	return reconciler.updateComponent(ctx, updated, "Autoscaler")
+}
+
+func mergeAutoscalerLabels(obj client.Object, labels map[string]string) {
+	merged := obj.GetLabels()
+	if merged == nil {
+		merged = map[string]string{}
+	}
+	for k, v := range labels {
+		merged[k] = v
+	}
+	obj.SetLabels(merged)
 }
 
 func (reconciler *ClusterReconciler) reconcileTaskManagerService(ctx context.Context) error {

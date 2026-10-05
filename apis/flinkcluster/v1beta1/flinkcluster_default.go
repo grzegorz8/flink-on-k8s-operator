@@ -48,6 +48,9 @@ func _SetDefault(cluster *FlinkCluster) {
 		cluster.Spec.TaskManager = &TaskManagerSpec{}
 	}
 	_SetTaskManagerDefault(cluster.Spec.TaskManager, flinkVersion)
+	if cluster.Spec.Autoscaler != nil {
+		_SetAutoscalerPodTemplateDefaults(&cluster.Spec.Autoscaler.PodTemplate)
+	}
 }
 
 func _SetJobManagerDefault(jmSpec *JobManagerSpec, flinkVersion *version.Version) {
@@ -156,5 +159,16 @@ func _SetTaskManagerDefault(tmSpec *TaskManagerSpec, flinkVersion *version.Versi
 			mergo.Merge(&readinessProbe, tmSpec.ReadinessProbe, mergo.WithOverride)
 		}
 		tmSpec.ReadinessProbe = &readinessProbe
+	}
+}
+
+func _SetAutoscalerPodTemplateDefaults(template *corev1.PodTemplateSpec) {
+	pod := &template.Spec
+	for _, containers := range [][]corev1.Container{pod.Containers, pod.InitContainers} {
+		for i := range containers {
+			if containers[i].ImagePullPolicy == "" {
+				containers[i].ImagePullPolicy = corev1.PullIfNotPresent
+			}
+		}
 	}
 }

@@ -17,6 +17,8 @@ limitations under the License.
 package flinkcluster
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"math"
 	"regexp"
@@ -29,6 +31,7 @@ import (
 	v1beta1 "github.com/spotify/flink-on-k8s-operator/apis/flinkcluster/v1beta1"
 	"github.com/spotify/flink-on-k8s-operator/internal/model"
 	"github.com/spotify/flink-on-k8s-operator/internal/util"
+	"go.yaml.in/yaml/v3"
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -46,18 +49,21 @@ import (
 // underlying Kubernetes resource specs.
 
 const (
-	preStopSleepSeconds     = 30
-	flinkConfigMapPath      = "/opt/flink/conf"
-	flinkConfigMapVolume    = "flink-config-volume"
-	submitJobScriptPath     = "/opt/flink-operator/submit-job.sh"
-	gcpServiceAccountVolume = "gcp-service-account-volume"
-	hadoopConfigVolume      = "hadoop-config-volume"
-	jobManagerAddrEnvVar    = "FLINK_JM_ADDR"
-	jobJarUriEnvVar         = "FLINK_JOB_JAR_URI"
-	jobPyFileUriEnvVar      = "FLINK_JOB_PY_FILE_URI"
-	jobPyFilesUriEnvVar     = "FLINK_JOB_PY_FILES_URI"
-	hadoopConfDirEnvVar     = "HADOOP_CONF_DIR"
-	gacEnvVar               = "GOOGLE_APPLICATION_CREDENTIALS"
+	autoscalerSpecHashAnnotation = "flinkoperator.k8s.io/autoscaler-spec-hash"
+	autoscalerConfigVolume       = "autoscaler-config"
+	autoscalerConfigPath         = "/opt/flink/conf/config.yaml"
+	preStopSleepSeconds          = 30
+	flinkConfigMapPath           = "/opt/flink/conf"
+	flinkConfigMapVolume         = "flink-config-volume"
+	submitJobScriptPath          = "/opt/flink-operator/submit-job.sh"
+	gcpServiceAccountVolume      = "gcp-service-account-volume"
+	hadoopConfigVolume           = "hadoop-config-volume"
+	jobManagerAddrEnvVar         = "FLINK_JM_ADDR"
+	jobJarUriEnvVar              = "FLINK_JOB_JAR_URI"
+	jobPyFileUriEnvVar           = "FLINK_JOB_PY_FILE_URI"
+	jobPyFilesUriEnvVar          = "FLINK_JOB_PY_FILES_URI"
+	hadoopConfDirEnvVar          = "HADOOP_CONF_DIR"
+	gacEnvVar                    = "GOOGLE_APPLICATION_CREDENTIALS"
 )
 
 var (
@@ -133,6 +139,24 @@ func getDesiredClusterState(observed *ObservedClusterState) *model.DesiredCluste
 		if !keepJobState {
 			state.Job = newJob(cluster)
 		}
+	}
+
+	if cluster.Spec.Autoscaler != nil && cluster.DeletionTimestamp == nil {
+		// The autoscaler needs both resources; leave both unset if either cannot be built.
+		checksum, err := autoscalerSpecChecksum(cluster)
+		if err != nil {
+			return state
+		}
+		config, err := newAutoscalerConfigMap(cluster, checksum)
+		if err != nil {
+			return state
+		}
+		deployment, err := newAutoscalerDeployment(cluster, checksum)
+		if err != nil {
+			return state
+		}
+		state.AutoscalerConfigMap = config
+		state.AutoscalerDeployment = deployment
 	}
 
 	return state
@@ -1427,4 +1451,80 @@ func getLogConf(spec v1beta1.FlinkClusterSpec) map[string]string {
 		result["logback-console.xml"] = DefaultLogbackConfig
 	}
 	return result
+}
+
+func autoscalerSpecChecksum(cluster *v1beta1.FlinkCluster) (string, error) {
+	spec, err := json.Marshal(cluster.Spec.Autoscaler)
+	if err != nil {
+		return "", fmt.Errorf("encode autoscaler specification: %w", err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(spec)), nil
+}
+
+func newAutoscalerConfigMap(cluster *v1beta1.FlinkCluster, checksum string) (*corev1.ConfigMap, error) {
+	config, err := yaml.Marshal(cluster.Spec.Autoscaler.AutoscalerProperties)
+	if err != nil {
+		return nil, fmt.Errorf("encode autoscaler configuration: %w", err)
+	}
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: getAutoscalerConfigMapName(cluster.Name), Namespace: cluster.Namespace,
+			Annotations: map[string]string{autoscalerSpecHashAnnotation: checksum},
+			Labels:      autoscalerLabels(cluster), OwnerReferences: []metav1.OwnerReference{autoscalerOwnerReference(cluster)},
+		},
+		Data: map[string]string{"config.yaml": string(config)},
+	}
+	return cm, nil
+}
+
+func newAutoscalerDeployment(cluster *v1beta1.FlinkCluster, checksum string) (*appsv1.Deployment, error) {
+	template := *cluster.Spec.Autoscaler.PodTemplate.DeepCopy()
+	if template.Labels == nil {
+		template.Labels = map[string]string{}
+	}
+	for k, v := range autoscalerLabels(cluster) {
+		template.Labels[k] = v
+	}
+	if template.Annotations == nil {
+		template.Annotations = map[string]string{}
+	}
+	template.Annotations[autoscalerSpecHashAnnotation] = checksum
+	template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{
+		Name: autoscalerConfigVolume,
+		VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+			LocalObjectReference: corev1.LocalObjectReference{Name: getAutoscalerConfigMapName(cluster.Name)},
+		}},
+	})
+	for i := range template.Spec.Containers {
+		template.Spec.Containers[i].VolumeMounts = append(template.Spec.Containers[i].VolumeMounts, corev1.VolumeMount{
+			Name: autoscalerConfigVolume, MountPath: autoscalerConfigPath,
+			SubPath: "config.yaml", ReadOnly: true,
+		})
+	}
+	replicas := int32(1)
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: getAutoscalerDeploymentName(cluster.Name), Namespace: cluster.Namespace,
+			Annotations: map[string]string{autoscalerSpecHashAnnotation: checksum},
+			Labels:      autoscalerLabels(cluster), OwnerReferences: []metav1.OwnerReference{autoscalerOwnerReference(cluster)},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: autoscalerLabels(cluster)},
+			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
+			Template: template,
+		},
+	}
+	return dep, nil
+}
+
+func autoscalerLabels(cluster *v1beta1.FlinkCluster) map[string]string {
+	return map[string]string{"app": "flink-autoscaler", "cluster": cluster.Name, "component": "autoscaler"}
+}
+
+func autoscalerOwnerReference(cluster *v1beta1.FlinkCluster) metav1.OwnerReference {
+	owner := ToOwnerReference(cluster)
+	owner.APIVersion = v1beta1.GroupVersion.String()
+	owner.Kind = "FlinkCluster"
+	return owner
 }

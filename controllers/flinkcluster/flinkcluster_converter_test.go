@@ -23,6 +23,7 @@ import (
 
 	"github.com/google/go-cmp/cmp/cmpopts"
 	v1beta1 "github.com/spotify/flink-on-k8s-operator/apis/flinkcluster/v1beta1"
+	"go.yaml.in/yaml/v3"
 	"gotest.tools/v3/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -1029,6 +1030,27 @@ taskmanager.rpc.port: 6122
 		expectedConfigMap)
 }
 
+func TestGetDesiredClusterStateAutoscaler(t *testing.T) {
+	for _, state := range []v1beta1.JobState{v1beta1.JobStateRunning, v1beta1.JobStateSucceeded, v1beta1.JobStateCancelled} {
+		t.Run(string(state), func(t *testing.T) {
+			// given: an autoscaler configured for a cluster in this job state
+			observed := getObservedClusterState()
+			observed.cluster.Spec.Autoscaler = autoscalerTestCluster().Spec.Autoscaler.DeepCopy()
+			observed.cluster.Status.Components.Job = &v1beta1.JobStatus{State: state}
+
+			// when: desired cluster state is built
+			desired := getDesiredClusterState(observed)
+
+			// then: both autoscaler resources are desired regardless of job state
+			assert.Assert(t, desired.AutoscalerConfigMap != nil)
+			assert.Assert(t, desired.AutoscalerDeployment != nil)
+			assert.Equal(t, desired.AutoscalerConfigMap.Name, "fjc-autoscaler-config")
+			assert.Equal(t, desired.AutoscalerDeployment.Name, "fjc-autoscaler")
+			assert.Equal(t, desired.AutoscalerConfigMap.Annotations[autoscalerSpecHashAnnotation], desired.AutoscalerDeployment.Annotations[autoscalerSpecHashAnnotation])
+		})
+	}
+}
+
 func TestTmDeploymentTypeDeployment(t *testing.T) {
 	var observed = getObservedClusterState()
 	observed.cluster.Spec.TaskManager.DeploymentType = v1beta1.DeploymentTypeDeployment
@@ -1736,4 +1758,78 @@ func TestClassPath(t *testing.T) {
 	args := desired.Job.Spec.Template.Spec.Containers[0].Args
 
 	assert.DeepEqual(t, args, expectedArgs)
+}
+
+func TestAutoscalerResources(t *testing.T) {
+	// given: a cluster with autoscaler properties and a Pod template
+	cluster := autoscalerTestCluster()
+	before := cluster.Spec.Autoscaler.PodTemplate.DeepCopy()
+
+	// when: resources are built
+	checksum, err := autoscalerSpecChecksum(cluster)
+	assert.NilError(t, err)
+	cm, err := newAutoscalerConfigMap(cluster, checksum)
+	assert.NilError(t, err)
+	dep, err := newAutoscalerDeployment(cluster, checksum)
+	assert.NilError(t, err)
+
+	// then: the configuration contains the autoscaler properties
+	var decoded map[string]string
+	assert.NilError(t, yaml.Unmarshal([]byte(cm.Data["config.yaml"]), &decoded))
+	assert.DeepEqual(t, decoded, cluster.Spec.Autoscaler.AutoscalerProperties)
+
+	// and: both resources belong to the FlinkCluster
+	owner := metav1.OwnerReference{
+		APIVersion: v1beta1.GroupVersion.String(), Kind: "FlinkCluster",
+		Name: cluster.Name, UID: cluster.UID,
+		Controller: &controller, BlockOwnerDeletion: &blockOwnerDeletion,
+	}
+	assert.DeepEqual(t, cm.OwnerReferences, []metav1.OwnerReference{owner})
+	assert.DeepEqual(t, dep.OwnerReferences, []metav1.OwnerReference{owner})
+
+	// and: the supplied template is untouched and managed labels cannot conflict
+	assert.DeepEqual(t, &cluster.Spec.Autoscaler.PodTemplate, before)
+	assert.Equal(t, dep.Spec.Template.Labels["app"], "flink-autoscaler")
+	assert.Equal(t, dep.Spec.Template.Labels["custom"], "kept")
+	assert.Equal(t, dep.Spec.Template.Annotations["custom"], "kept")
+	assert.DeepEqual(t, dep.Spec.Selector.MatchLabels, autoscalerLabels(cluster))
+	assert.Equal(t, *dep.Spec.Replicas, int32(1))
+	assert.Equal(t, dep.Spec.Strategy.Type, appsv1.RecreateDeploymentStrategyType)
+}
+
+func autoscalerTestCluster() *v1beta1.FlinkCluster {
+	return &v1beta1.FlinkCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "example",
+			Namespace: "default",
+			UID:       "cluster-uid",
+		},
+		Spec: v1beta1.FlinkClusterSpec{
+			Autoscaler: &v1beta1.AutoscalerSpec{
+				AutoscalerProperties: map[string]string{
+					"autoscaler.interval": "30s",
+					"autoscaler.target":   "example",
+				},
+				PodTemplate: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							"app":    "flink",
+							"custom": "kept",
+						},
+						Annotations: map[string]string{
+							"custom": "kept",
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "autoscaler",
+								Image: "example/autoscaler:1",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
 }

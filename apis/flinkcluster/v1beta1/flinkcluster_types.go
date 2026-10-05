@@ -749,6 +749,9 @@ type FlinkClusterSpec struct {
 	// otherwise, it is a long-running Session Cluster.
 	Job *JobSpec `json:"job,omitempty"`
 
+	// _(Optional)_ Independent autoscaler Deployment for streaming Application jobs.
+	Autoscaler *AutoscalerSpec `json:"autoscaler,omitempty"`
+
 	// _(Optional)_ Environment variables shared by all JobManager, TaskManager and job
 	// containers.
 	// [More info](https://kubernetes.io/docs/tasks/inject-data-application/define-environment-variable-container/)
@@ -782,6 +785,17 @@ type FlinkClusterSpec struct {
 	// Recreate components when updating flinkcluster, default: true.
 	// +kubebuilder:default:=true
 	RecreateOnUpdate *bool `json:"recreateOnUpdate,omitempty"`
+}
+
+// AutoscalerSpec configures the independent autoscaler for streaming Application jobs.
+// The section has no defaults, preserving existing cluster revisions.
+type AutoscalerSpec struct {
+	// _(Optional)_ Pod template including user-supplied images and runtime configuration.
+	// Required when the autoscaler section is present. Every regular container receives config.yaml at /opt/flink/conf/config.yaml.
+	PodTemplate corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
+
+	// _(Optional)_ String properties serialized as config.yaml without inheriting Flink properties.
+	AutoscalerProperties map[string]string `json:"autoscalerProperties,omitempty"`
 }
 
 // HadoopConfig defines configs for Hadoop.
@@ -858,6 +872,15 @@ type TaskManagerStatus struct {
 	Selector string `json:"selector"`
 }
 
+// AutoscalerStatus reports the independent autoscaler Deployment.
+type AutoscalerStatus struct {
+	// The Deployment name.
+	Name string `json:"name"`
+
+	// The state of the component, independent of Flink readiness.
+	State ComponentState `json:"state"`
+}
+
 // FlinkClusterComponentsStatus defines the observed status of the
 // components of a FlinkCluster.
 type FlinkClusterComponentsStatus struct {
@@ -875,6 +898,9 @@ type FlinkClusterComponentsStatus struct {
 
 	// The state of TaskManager.
 	TaskManager *TaskManagerStatus `json:"taskManager,omitempty"`
+
+	// The state of the independent autoscaler Deployment.
+	Autoscaler *AutoscalerStatus `json:"autoscaler,omitempty"`
 
 	// The status of the job, available only when JobSpec is provided.
 	Job *JobStatus `json:"job,omitempty"`

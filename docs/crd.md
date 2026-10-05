@@ -13,6 +13,41 @@ Package v1beta1 contains API Schema definitions for the flinkoperator v1beta1 AP
 
 
 
+#### AutoscalerSpec
+
+
+
+AutoscalerSpec configures the independent autoscaler for streaming Application jobs.
+The section has no defaults, preserving existing cluster revisions.
+
+
+
+_Appears in:_
+- [FlinkClusterSpec](#flinkclusterspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.23/#podtemplatespec-v1-core)_ | _(Optional)_ Pod template including user-supplied images and runtime configuration.<br />Required when the autoscaler section is present. Every regular container receives config.yaml at /opt/flink/conf/config.yaml. |  |  |
+| `autoscalerProperties` _object (keys:string, values:string)_ | _(Optional)_ String properties serialized as config.yaml without inheriting Flink properties. |  |  |
+
+
+#### AutoscalerStatus
+
+
+
+AutoscalerStatus reports the independent autoscaler Deployment.
+
+
+
+_Appears in:_
+- [FlinkClusterComponentsStatus](#flinkclustercomponentsstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | The Deployment name. |  |  |
+| `state` _[ComponentState](#componentstate)_ | The state of the component, independent of Flink readiness. |  |  |
+
+
 #### BatchSchedulerSpec
 
 
@@ -94,6 +129,7 @@ _Underlying type:_ _string_
 
 
 _Appears in:_
+- [AutoscalerStatus](#autoscalerstatus)
 - [ConfigMapStatus](#configmapstatus)
 - [JobManagerIngressStatus](#jobmanageringressstatus)
 - [JobManagerServiceStatus](#jobmanagerservicestatus)
@@ -175,6 +211,7 @@ _Appears in:_
 | `jobManagerService` _[JobManagerServiceStatus](#jobmanagerservicestatus)_ | The state of JobManager service. |  |  |
 | `jobManagerIngress` _[JobManagerIngressStatus](#jobmanageringressstatus)_ | The state of JobManager ingress. |  |  |
 | `taskManager` _[TaskManagerStatus](#taskmanagerstatus)_ | The state of TaskManager. |  |  |
+| `autoscaler` _[AutoscalerStatus](#autoscalerstatus)_ | The state of the independent autoscaler Deployment. |  |  |
 | `job` _[JobStatus](#jobstatus)_ | The status of the job, available only when JobSpec is provided. |  |  |
 
 
@@ -220,6 +257,7 @@ _Appears in:_
 | `jobManager` _[JobManagerSpec](#jobmanagerspec)_ | _(Optional)_ Flink JobManager spec. | \{ replicas:1 \} |  |
 | `taskManager` _[TaskManagerSpec](#taskmanagerspec)_ | _(Optional)_ Flink TaskManager spec. | \{ replicas:3 \} |  |
 | `job` _[JobSpec](#jobspec)_ | _(Optional)_ Job spec. If specified, this cluster is an ephemeral Job<br />Cluster, which will be automatically terminated after the job finishes;<br />otherwise, it is a long-running Session Cluster. |  |  |
+| `autoscaler` _[AutoscalerSpec](#autoscalerspec)_ | _(Optional)_ Independent autoscaler Deployment for streaming Application jobs. |  |  |
 | `envVars` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.23/#envvar-v1-core) array_ | _(Optional)_ Environment variables shared by all JobManager, TaskManager and job<br />containers.<br />[More info](https://kubernetes.io/docs/tasks/inject-data-application/define-environment-variable-container/) |  |  |
 | `envFrom` _[EnvFromSource](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.23/#envfromsource-v1-core) array_ | _(Optional)_ Environment variables injected from a source, shared by all JobManager,<br />TaskManager and job containers.<br />[More info](https://kubernetes.io/docs/tasks/configure-pod-container/configure-pod-configmap/#configure-all-key-value-pairs-in-a-configmap-as-container-environment-variables) |  |  |
 | `flinkProperties` _object (keys:string, values:string)_ | _(Optional)_ Flink properties which are appended to `flink-conf.yaml` (Flink 1.X) or `config.yaml` (Flink 2.X). |  |  |

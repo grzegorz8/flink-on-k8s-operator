@@ -74,6 +74,8 @@ type ObservedClusterState struct {
 	revision                Revision
 	observeTime             time.Time
 	updateState             UpdateState
+	autoscalerDeployment    *appsv1.Deployment
+	autoscalerConfigMap     *corev1.ConfigMap
 }
 
 type FlinkJob struct {
@@ -217,6 +219,12 @@ func (observer *ClusterStateObserver) observe(ctx context.Context, observed *Obs
 		// (Optional) job.
 		if err := observer.observeJob(ctx, observed); err != nil {
 			log.Error(err, "Failed to get Flink job status")
+			return err
+		}
+
+		// Autoscaler Deployment and ConfigMap.
+		if err := observer.observeAutoscaler(ctx, observed); err != nil {
+			log.Error(err, "Failed to get autoscaler resources")
 			return err
 		}
 	}
@@ -668,6 +676,32 @@ func (observer *ClusterStateObserver) observePersistentVolumeClaims(
 		return err
 	}
 
+	return nil
+}
+
+func (observer *ClusterStateObserver) observeAutoscaler(ctx context.Context, observed *ObservedClusterState) error {
+	observed.autoscalerDeployment = nil
+	observed.autoscalerConfigMap = nil
+	if observed.cluster == nil || observed.cluster.DeletionTimestamp != nil {
+		return nil
+	}
+	deployment := new(appsv1.Deployment)
+	if err := observer.observeObject(ctx, getAutoscalerDeploymentName(observed.cluster.Name), deployment); err != nil {
+		if client.IgnoreNotFound(err) != nil {
+			return err
+		}
+		deployment = nil
+	}
+	observed.autoscalerDeployment = deployment
+
+	config := new(corev1.ConfigMap)
+	if err := observer.observeObject(ctx, getAutoscalerConfigMapName(observed.cluster.Name), config); err != nil {
+		if client.IgnoreNotFound(err) != nil {
+			return err
+		}
+		config = nil
+	}
+	observed.autoscalerConfigMap = config
 	return nil
 }
 

@@ -141,6 +141,16 @@ func getSubmitterJobName(clusterName string) string {
 	return clusterName + "-job-submitter"
 }
 
+// Gets autoscaler Deployment name
+func getAutoscalerDeploymentName(clusterName string) string {
+	return clusterName + "-autoscaler"
+}
+
+// Gets autoscaler ConfigMap name
+func getAutoscalerConfigMapName(clusterName string) string {
+	return clusterName + "-autoscaler-config"
+}
+
 // Checks whether it is possible to take savepoint.
 func canTakeSavepoint(cluster *v1beta1.FlinkCluster) bool {
 	var jobSpec = cluster.Spec.Job
@@ -195,16 +205,14 @@ func newRevision(cluster *v1beta1.FlinkCluster, revision int64, collisionCount *
 
 func newRevisionDataPatch(cluster *v1beta1.FlinkCluster) ([]byte, error) {
 	// Ignore fields not related to rendering job resource.
-	var c *v1beta1.FlinkCluster
+	c := cluster.DeepCopy()
+	c.Spec.Autoscaler = nil
 	if cluster.Spec.Job != nil {
-		c = cluster.DeepCopy()
 		c.Spec.Job.CleanupPolicy = nil
 		c.Spec.Job.RestartPolicy = nil
 		c.Spec.Job.CancelRequested = nil
 		c.Spec.Job.SavepointGeneration = 0
 		c.Spec.Job.SavepointFormatType = nil
-	} else {
-		c = cluster
 	}
 
 	str := &bytes.Buffer{}

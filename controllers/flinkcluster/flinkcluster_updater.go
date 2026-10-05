@@ -81,7 +81,10 @@ func (updater *ClusterStatusUpdater) updateStatusIfChanged(ctx context.Context) 
 		&updater.observed)
 
 	// Compare
-	var changed = updater.isStatusChanged(ctx, oldStatus, newStatus)
+	// Persist autoscaler status changes even when the rest of the cluster status is unchanged.
+	flinkChanged := updater.isStatusChanged(ctx, oldStatus, newStatus)
+	autoscalerChanged := !reflect.DeepEqual(oldStatus.Components.Autoscaler, newStatus.Components.Autoscaler)
+	changed := flinkChanged || autoscalerChanged
 
 	// Update
 	if changed {
@@ -98,7 +101,7 @@ func (updater *ClusterStatusUpdater) updateStatusIfChanged(ctx context.Context) 
 		updater.createStatusChangeEvents(oldStatus, newStatus)
 		var tc = &util.TimeConverter{}
 		newStatus.LastUpdateTime = tc.ToString(time.Now())
-		return true, updater.updateClusterStatus(ctx, newStatus)
+		return flinkChanged, updater.updateClusterStatus(ctx, newStatus)
 	}
 
 	log.Info("No status change", "state", oldStatus.State)
@@ -572,6 +575,9 @@ func (updater *ClusterStatusUpdater) deriveClusterStatus(
 		observed.updateState,
 		&observed.revision,
 		&recorded.Revision)
+
+	// (Optional) Autoscaler.
+	status.Components.Autoscaler = updater.deriveAutoscalerStatus()
 
 	return status
 }
@@ -1169,4 +1175,37 @@ func getDeploymentState(deployment *appsv1.Deployment) v1beta1.ComponentState {
 		return v1beta1.ComponentStateReady
 	}
 	return v1beta1.ComponentStateNotReady
+}
+
+func (updater *ClusterStatusUpdater) deriveAutoscalerStatus() *v1beta1.AutoscalerStatus {
+	observed := updater.observed
+	cluster := observed.cluster
+	if cluster.DeletionTimestamp != nil {
+		return cluster.Status.Components.Autoscaler.DeepCopy()
+	}
+	deployment := observed.autoscalerDeployment
+	if deployment == nil {
+		if cluster.Spec.Autoscaler == nil {
+			return nil
+		}
+		return &v1beta1.AutoscalerStatus{Name: getAutoscalerDeploymentName(cluster.Name), State: v1beta1.ComponentStateNotReady}
+	}
+	if cluster.Spec.Autoscaler != nil && deployment.DeletionTimestamp == nil {
+		checksum, err := autoscalerSpecChecksum(cluster)
+		if err == nil && deployment.Annotations[autoscalerSpecHashAnnotation] != checksum {
+			return &v1beta1.AutoscalerStatus{Name: deployment.Name, State: v1beta1.ComponentStateUpdating}
+		}
+	}
+	replicas := int32(1)
+	if deployment.Spec.Replicas != nil {
+		replicas = *deployment.Spec.Replicas
+	}
+	state := v1beta1.ComponentStateNotReady
+	if deployment.DeletionTimestamp == nil &&
+		deployment.Status.ObservedGeneration >= deployment.Generation &&
+		deployment.Status.UpdatedReplicas >= replicas &&
+		deployment.Status.ReadyReplicas >= replicas {
+		state = v1beta1.ComponentStateReady
+	}
+	return &v1beta1.AutoscalerStatus{Name: deployment.Name, State: state}
 }

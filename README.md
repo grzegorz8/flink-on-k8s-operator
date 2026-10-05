@@ -79,6 +79,7 @@ The operator is still under active development; there is no Helm chart available
 - [Test with Apache Kafka](docs/kafka_test_guide.md)
 - [Create Flink job clusters with Helm Chart](docs/flink_job_cluster_guide.md)
 - [Run Python job using pyflink API](docs/python_guide.md)
+- [Configure a FlinkCluster autoscaler](docs/autoscaler.md)
 
 ### Tech talks
 

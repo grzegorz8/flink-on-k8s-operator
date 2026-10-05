@@ -180,6 +180,28 @@ func TestNewRevisionDataPatchExcludesSavepointFormatType(t *testing.T) {
 		"nil vs NATIVE should produce the same revision patch")
 }
 
+func TestNewRevisionDataPatchExcludesAutoscaler(t *testing.T) {
+	// given: identical Flink specs with omitted, configured, and modified autoscalers
+	configured := autoscalerTestCluster()
+	omitted := configured.DeepCopy()
+	omitted.Spec.Autoscaler = nil
+	modified := configured.DeepCopy()
+	modified.Spec.Autoscaler.AutoscalerProperties = map[string]string{"key": "new-value"}
+	modified.Spec.Autoscaler.PodTemplate.Spec.Containers[0].Image = "example/autoscaler:2"
+
+	// when: revision patches are generated
+	patchOmitted, err := newRevisionDataPatch(omitted)
+	assert.NilError(t, err)
+	patchConfigured, err := newRevisionDataPatch(configured)
+	assert.NilError(t, err)
+	patchModified, err := newRevisionDataPatch(modified)
+	assert.NilError(t, err)
+
+	// then: autoscaler configuration and changes do not affect the revision patch
+	assert.DeepEqual(t, patchOmitted, patchConfigured)
+	assert.DeepEqual(t, patchOmitted, patchModified)
+}
+
 func TestCanTakeSavepoint(t *testing.T) {
 	// session cluster
 	var cluster = v1beta1.FlinkCluster{
